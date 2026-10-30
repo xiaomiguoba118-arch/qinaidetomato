@@ -687,8 +687,9 @@ const ING_MAP = [
 ];
 
 function seed(){
-  const d = (cat, name, ing, cost, on) => ({
-    id: uid(), cat, name, ing, cost, on: on !== false,
+  // id 写死，两台设备各自初始化后合并也不会出现重复菜
+  const d = (id, cat, name, ing, cost, on) => ({
+    id, cat, name, ing, cost, on: on !== false,
     steps: RECIPE_STEPS[cat] || []
   });
   return {
@@ -703,19 +704,19 @@ function seed(){
       { id: 'zheng',name: '蒸', sub: '上汽清蒸' }
     ],
     dishes: [
-      d('chao', '荷兰豆炒碎肉', ['荷兰豆', '猪肉', '蒜'], 18),
-      d('chao', '爆炒宫保鸡丁五彩版', ['鸡肉', '辣椒', '葱'], 22),
-      d('chao', '清炒四素', ['白菜', '香菇', '蒜'], 12),
-      d('chao', '双彩椒炒肉', ['彩椒', '猪肉', '蒜'], 20),
-      d('chao', '番茄炒鸡蛋带肉酿', ['番茄', '鸡蛋', '猪肉'], 16),
-      d('chao', '豆角炒肉沫', ['豆角', '猪肉', '蒜'], 16),
-      d('zha', '炸肉', ['猪肉', '鸡蛋'], 24),
-      d('zhu', '煮牛锅', ['牛腩', '番茄', '豆腐'], 38),
-      d('tang', '紫菜蛋花汤', ['番茄', '鸡蛋', '紫菜'], 22),
-      d('kao', '烤肉', ['猪肉', '蒜'], 28),
-      d('zheng', '蒸蛋', ['鸡蛋', '葱'], 8)
+      d('d1', 'chao', '荷兰豆炒碎肉', ['荷兰豆', '猪肉', '蒜'], 18),
+      d('d2', 'chao', '爆炒宫保鸡丁五彩版', ['鸡肉', '辣椒', '葱'], 22),
+      d('d3', 'chao', '清炒四素', ['白菜', '香菇', '蒜'], 12),
+      d('d4', 'chao', '双彩椒炒肉', ['彩椒', '猪肉', '蒜'], 20),
+      d('d5', 'chao', '番茄炒鸡蛋带肉酿', ['番茄', '鸡蛋', '猪肉'], 16),
+      d('d6', 'chao', '豆角炒肉沫', ['豆角', '猪肉', '蒜'], 16),
+      d('d7', 'zha', '炸肉', ['猪肉', '鸡蛋'], 24),
+      d('d8', 'zhu', '煮牛锅', ['牛腩', '番茄', '豆腐'], 38),
+      d('d9', 'tang', '紫菜蛋花汤', ['番茄', '鸡蛋', '紫菜'], 22),
+      d('d10', 'kao', '烤肉', ['猪肉', '蒜'], 28),
+      d('d11', 'zheng', '蒸蛋', ['鸡蛋', '葱'], 8)
     ],
-    pantry: ['番茄', '鸡蛋', '葱', '盐', '蒜', '面条'],
+    pantry: ['番茄', '鸡蛋', '葱', '盐', '蒜', '面条', '猪肉'],
     orders: [],
     recent: [],
     records: [],
@@ -744,33 +745,78 @@ function saveLocal(){
 /* =========================================================
    2.5 双人同步（用服务器打开时自动开启）
    ========================================================= */
-const SYNC = { on:false, rev:0, busy:false, pushT:null, pollT:null };
+const SUPABASE_URL = 'https://zvnuomxyuvsybwsyakwl.supabase.co';
+const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inp2bnVvbXh5dXZzeWJ3c3lha3dsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTMzNDE2MzYsImV4cCI6MjEwODkxNzYzNn0.uR3qs-_IdmcKNwoE-vaO3HzI25dP6hBvYpSgXrtTEJ0';
+const ROOM_CODE = 'qinaidetomato';
 
-function api(url, opt){
-  const conf = Object.assign({ cache:'no-store' }, opt || {});
-  return fetch(url, conf).then(r => {
-    if (!r.ok) throw new Error('http ' + r.status);
-    return r.json();
+const SYNC = { on:false, busy:false, pushT:null, pollT:null };
+
+function sbHeaders(extra){
+  return Object.assign({
+    apikey: SUPABASE_KEY,
+    Authorization: 'Bearer ' + SUPABASE_KEY
+  }, extra || {});
+}
+
+function pullRemote(){
+  const u = SUPABASE_URL + '/rest/v1/rooms?code=eq.' + encodeURIComponent(ROOM_CODE) + '&select=state';
+  return fetch(u, { headers: sbHeaders(), cache:'no-store' })
+    .then(function(r){ if (!r.ok) throw new Error('pull ' + r.status); return r.json(); })
+    .then(function(rows){ return (rows && rows.length) ? rows[0].state : null; });
+}
+
+function pushRemote(st){
+  return fetch(SUPABASE_URL + '/rest/v1/rooms', {
+    method: 'POST',
+    headers: sbHeaders({
+      'Content-Type': 'application/json',
+      Prefer: 'resolution=merge-duplicates,return=minimal'
+    }),
+    body: JSON.stringify([{ code: ROOM_CODE, state: st, updated_at: new Date().toISOString() }])
+  }).then(function(r){ if (!r.ok) throw new Error('push ' + r.status); });
+}
+
+/* 合并两份数据：两边新加的都不丢，删掉的不会复活 */
+function mergeState(a, b){
+  if (!a) return b ? JSON.parse(JSON.stringify(b)) : null;
+  if (!b) return a;
+  const out = Object.assign({}, a, b);
+  const union = function(x, y){
+    const m = new Map();
+    (x || []).forEach(function(o){ if (o && o.id != null) m.set(o.id, o); });
+    (y || []).forEach(function(o){ if (o && o.id != null) m.set(o.id, o); });
+    return Array.from(m.values());
+  };
+  ['dishes', 'orders', 'pending', 'categories'].forEach(function(k){
+    out[k] = union(a[k], b[k]);
   });
+  const tomb = Array.from(new Set([].concat(a.tombstones || [], b.tombstones || [])));
+  out.tombstones = tomb;
+  ['dishes', 'orders', 'pending', 'categories'].forEach(function(k){
+    out[k] = (out[k] || []).filter(function(o){ return tomb.indexOf(o.id) < 0; });
+  });
+  const rmap = new Map();
+  [].concat(a.records || [], b.records || []).forEach(function(r){ if (r && r.at) rmap.set(r.at, r); });
+  out.records = Array.from(rmap.values()).sort(function(x, y){ return x.at - y.at; });
+  out.orderCount = (out.orders || []).length;
+  out.pantry = b.pantry || a.pantry || [];
+  out.restock = b.restock || a.restock || [];
+  out.recent = b.recent || a.recent || [];
+  return out;
 }
 
 function initSync(){
-  if (location.protocol === 'file:') return Promise.resolve(false);
-  return api('api/state').then(d => {
+  S = loadLocal() || seed();
+  return pullRemote().then(function(remote){
     SYNC.on = true;
-    SYNC.rev = d.rev;
-    if (d.state && d.state.dishes){
-      S = d.state;
-    } else {
-      S = seed();
-      doPush();
-    }
+    if (remote) S = mergeState(S, remote);
     if (!S.restock) S.restock = [];
     if (!S.pending) S.pending = [];
     if (!S.tombstones) S.tombstones = [];
     saveLocal();
+    if (!remote) pushRemote(S).catch(function(){});
     return true;
-  }).catch(() => false);
+  }).catch(function(){ return false; });
 }
 
 function save(){
@@ -780,39 +826,40 @@ function save(){
 
 function schedulePush(){
   clearTimeout(SYNC.pushT);
-  SYNC.pushT = setTimeout(doPush, 130);
+  SYNC.pushT = setTimeout(doPush, 220);
 }
 
 function doPush(){
   if (!SYNC.on) return Promise.resolve();
-  if (SYNC.busy) { schedulePush(); return Promise.resolve(); }
+  if (SYNC.busy){ schedulePush(); return Promise.resolve(); }
   SYNC.busy = true;
-  const sent = JSON.stringify(S);
-  return api('api/state', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ state: S })
-  }).then(d => {
-    SYNC.rev = d.rev;
-    const merged = JSON.stringify(d.state);
-    saveLocal();
-    if (merged !== sent){
-      S = d.state;
-      saveLocal();
-      if (R.screen !== 'add' && R.screen !== 'upload') render();
-    }
-  }).catch(() => {}).then(() => { SYNC.busy = false; });
+  const before = JSON.stringify(S);
+
+  return pullRemote()
+    .catch(function(){ return null; })
+    .then(function(remote){
+      const merged = mergeState(remote, S);
+      return pushRemote(merged).then(function(){
+        S = merged;
+        saveLocal();
+        SYNC.busy = false;
+        if (JSON.stringify(S) !== before && R.screen !== 'add' && R.screen !== 'upload') render();
+      });
+    })
+    .catch(function(){ SYNC.busy = false; });
 }
 
 function poll(){
   if (!SYNC.on || SYNC.busy) return;
-  api('api/state').then(d => {
-    if (d.rev === SYNC.rev) return;
-    SYNC.rev = d.rev;
-    S = d.state;
-    saveLocal();
-    if (R.screen !== 'add' && R.screen !== 'upload') render();
-  }).catch(() => {});
+  pullRemote().then(function(remote){
+    if (!remote) return;
+    const merged = mergeState(S, remote);
+    if (JSON.stringify(merged) !== JSON.stringify(S)){
+      S = merged;
+      saveLocal();
+      if (R.screen !== 'add' && R.screen !== 'upload') render();
+    }
+  }).catch(function(){});
 }
 
 /* =========================================================
@@ -857,7 +904,6 @@ function tick(){
   o.connect(g); g.connect(MUSIC.gain);
   o.start(t); o.stop(t + 1.1);
 
-  // 每 4 拍垫一个低音
   if (MUSIC.step % 4 === 0){
     const b = 110 * Math.pow(2, BASS[(MUSIC.step / 4) % BASS.length] / 12);
     const o2 = AC.createOscillator(), g2 = AC.createGain();
